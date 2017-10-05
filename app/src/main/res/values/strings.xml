@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Utilities</string>
+    <string name="title_activity_joda_time">JodaTimeActivity</string>
+    <string name="title_activity_log">LogActivity</string>
+</resources>
