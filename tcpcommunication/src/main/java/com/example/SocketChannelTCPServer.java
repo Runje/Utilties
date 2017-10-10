@@ -15,12 +15,15 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Created by Thomas on 16.01.2016.
  */
 public class SocketChannelTCPServer implements TCPServer
 {
+    private Logger logger = LoggerFactory.getLogger(getClass().getSimpleName());
     public static int bufferSize = 9000;
     private final int port;
     private final ExecutorService service;
@@ -28,6 +31,8 @@ public class SocketChannelTCPServer implements TCPServer
     protected OnReceiveBytesFromClientListener onReceiveBytesListener;
     private boolean running;
     private OnAcceptListener onAcceptListener;
+    private Thread receiveThread;
+    private ServerSocketChannel socketChannel;
 
 
     @Override
@@ -63,7 +68,7 @@ public class SocketChannelTCPServer implements TCPServer
         {
             running = true;
             selector = Selector.open();
-            ServerSocketChannel socketChannel = ServerSocketChannel.open();
+            socketChannel = ServerSocketChannel.open();
             socketChannel.configureBlocking(false);
             socketChannel.bind(new InetSocketAddress(port));
             socketChannel.register(selector, SelectionKey.OP_ACCEPT);
@@ -71,7 +76,7 @@ public class SocketChannelTCPServer implements TCPServer
             return true;
         } catch (IOException e)
         {
-            e.printStackTrace();
+            logger.error(e.getMessage());
             running = false;
             return false;
         }
@@ -79,7 +84,7 @@ public class SocketChannelTCPServer implements TCPServer
 
     private void handleSelector()
     {
-        new Thread(new Runnable()
+        receiveThread = new Thread(new Runnable()
         {
             @Override
             public void run()
@@ -90,7 +95,7 @@ public class SocketChannelTCPServer implements TCPServer
                     try
                     {
                         int selected = selector.select();
-                        System.out.println("selected: " + selected);
+                        logger.info("selected: " + selected);
                         Iterator it = selector.selectedKeys().iterator();
                         while (it.hasNext())
                         {
@@ -103,7 +108,7 @@ public class SocketChannelTCPServer implements TCPServer
                                 SocketChannel sc = ssChannel.accept();
                                 sc.configureBlocking(false);
                                 clients.add(new Client(sc));
-                                System.out.println("Accepted Client: " + clients.size());
+                                logger.info("Accepted Client: " + clients.size());
                                 sc.register(selector, SelectionKey.OP_READ);
                                 if (onAcceptListener != null)
                                 {
@@ -114,7 +119,7 @@ public class SocketChannelTCPServer implements TCPServer
 
                             if (selKey.isReadable())
                             {
-                                System.out.println("Reading...");
+                                logger.info("Reading...");
                                 SocketChannel channel = (SocketChannel) selKey.channel();
                                 final Client client = getClient(channel, clients);
                                 if (client != null)
@@ -137,7 +142,7 @@ public class SocketChannelTCPServer implements TCPServer
 
                                             client.lengthBuffer.flip();
                                             client.length = client.lengthBuffer.getInt();
-                                            System.out.println("Length: " + client.length);
+                                            logger.info("Length: " + client.length);
                                             client.isLengthRead = true;
                                         } else
                                         {
@@ -160,37 +165,38 @@ public class SocketChannelTCPServer implements TCPServer
                                                     @Override
                                                     public void run()
                                                     {
-                                                        System.out.println("Calling receiveBytes");
+                                                        logger.info("Calling receiveBytes");
                                                         onReceiveBytes(bytes, client.channel);
                                                     }
                                                 });
                                                 client.isLengthRead = false;
-                                                System.out.println("Bytes read: " + (client.length - 4));
+                                                logger.info("Bytes read: " + (client.length - 4));
                                                 client.length = 0;
                                             }
                                         }
                                     }
                                     catch (Exception e)
                                     {
-                                        e.printStackTrace();
+                                        logger.error(e.getMessage());
                                         closeClient(client, clients);
                                     }
                                  }
                                 else
                                 {
-                                    System.out.println("No client found");
+                                    logger.info("No client found");
                                 }
                             }
                         }
                     } catch (IOException e)
                     {
-                        e.printStackTrace();
+                        logger.error(e.getMessage());
                     }
                 }
 
-                //System.out.println("Thread ends");
+                logger.info("Receiver Thread ends");
             }
-        }).start();
+        });
+        receiveThread.start();
     }
 
     private void closeClient(Client client, List<Client> clients)
@@ -200,11 +206,11 @@ public class SocketChannelTCPServer implements TCPServer
             client.channel.close();
         } catch (IOException e)
         {
-            e.printStackTrace();
+            logger.error(e.getMessage());
         }
 
         clients.remove(client);
-        System.out.println("Remove client, Clients left: " + clients.size());
+        logger.info("Remove client, Clients left: " + clients.size());
 
         if (onRemoveClientListener != null)
         {
@@ -237,17 +243,17 @@ public class SocketChannelTCPServer implements TCPServer
     {
         try
         {
-            System.out.println("Trying to write " + buffer.limit() + " bytes. Channel: " + channel);
+            logger.info("Trying to write " + buffer.limit() + " bytes. Channel: " + channel);
             int bytes = 0;
             while(buffer.hasRemaining())
             {
                 bytes += channel.write(buffer);
             }
-            System.out.println("Wrote bytes: " + bytes + "/" + buffer.limit());
+            logger.info("Wrote bytes: " + bytes + "/" + buffer.limit());
             return true;
         } catch (IOException e)
         {
-            e.printStackTrace();
+            logger.error(e.getMessage());
             return false;
         }
     }
@@ -256,6 +262,36 @@ public class SocketChannelTCPServer implements TCPServer
     public void stop()
     {
         running = false;
+        try
+        {
+            logger.info("Closing selector...");
+            selector.close();
+        } catch (IOException e) {
+            logger.error(e.getMessage());
+        }
+
+        if (socketChannel != null) {
+            try {
+                logger.info("Closing socketchannel...");
+                socketChannel.close();
+                logger.info("Closed socket channel");
+            } catch (IOException e) {
+                logger.error(e.getMessage());
+            }
+        }
+
+        if (receiveThread != null) {
+            try {
+                logger.info("Waiting for receive thread to end...");
+                receiveThread.join();
+
+            } catch (InterruptedException e) {
+                logger.error(e.getMessage());
+            }
+        }
+
+        logger.info("SocketChannelTCPServer closed");
+
     }
 
     @Override
