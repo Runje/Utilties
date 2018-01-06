@@ -1,5 +1,8 @@
 package com.example;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -17,6 +20,7 @@ import java.util.concurrent.Executors;
  */
 public class SocketChannelTCPClient extends TCPClient
 {
+    private Logger logger = LoggerFactory.getLogger(getClass().getSimpleName());
     private ExecutorService service;
     private SocketChannel socketChannel;
     private Selector selector;
@@ -46,43 +50,31 @@ public class SocketChannelTCPClient extends TCPClient
             socketChannel = SocketChannel.open();
             selector = Selector.open();
             service = Executors.newCachedThreadPool();
-             service.submit(new Runnable()
-            {
-                @Override
-                public void run()
-                {
+             service.submit(() -> {
 
-                    boolean connected = false;
-                    try
-                    {
-                        connected = socketChannel.connect(new InetSocketAddress(ipaddress, port));
+                 boolean connected = false;
+                 try
+                 {
+                     connected = socketChannel.connect(new InetSocketAddress(ipaddress, port));
 
-                        socketChannel.configureBlocking(false);
-                        socketChannel.register(selector, SelectionKey.OP_READ);
-                        connectionPending = false;
+                     socketChannel.configureBlocking(false);
+                     socketChannel.register(selector, SelectionKey.OP_READ);
+                     connectionPending = false;
 
-                        service.submit(new Runnable()
-                        {
-                            @Override
-                            public void run()
-                            {
-                                handleSelection();
-                            }
-                        });
+                     service.submit(() -> handleSelection());
 
-                        setConnected(connected);
-                    } catch (IOException e)
-                    {
-                        e.printStackTrace();
-                        disconnect();
-                        connectionPending = false;
-                    }
-                }
-            });
+                     setConnected(connected);
+                 } catch (IOException e)
+                 {
+                     logger.error(e.getMessage());
+                     disconnect();
+                     connectionPending = false;
+                 }
+             });
 
         } catch (IOException e)
         {
-            e.printStackTrace();
+            logger.error(e.getMessage());
             disconnect();
         }
     }
@@ -90,7 +82,7 @@ public class SocketChannelTCPClient extends TCPClient
     private void handleSelection()
     {
         ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
-        ByteBuffer contentBuffer = ByteBuffer.allocate(bufferSize);
+        //ByteBuffer contentBuffer = ByteBuffer.allocate(bufferSize);
         boolean lengthRead = false;
         int length = 0;
         while (true)
@@ -100,11 +92,11 @@ public class SocketChannelTCPClient extends TCPClient
                 int selected = selector.select();
                 if (selected == 0)
                 {
-                    System.out.println("ZERO Selected");
+                    logger.trace("ZERO Selected");
                     continue;
                 }
 
-                System.out.println("Selected: " + selected);
+                logger.trace("Selected: " + selected);
                 Set<SelectionKey> selectedKeys = selector.selectedKeys();
                 Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
 
@@ -114,22 +106,22 @@ public class SocketChannelTCPClient extends TCPClient
                     keyIterator.remove();
                     if (selectionKey.isConnectable())
                     {
-                        System.out.println("Connection pending: " + socketChannel.isConnectionPending());
+                        logger.trace("Connection pending: " + socketChannel.isConnectionPending());
                         /**if (socketChannel.isConnectionPending())
                         {
                             while (!socketChannel.finishConnect())
                             {
-                                System.out.println("Waiting");
+                                logger.trace("Waiting");
                                 Thread.sleep(100);
                             }
                         }
-                        System.out.println("Connected!");
+                        logger.trace("Connected!");
                         setConnected(true);**/
 
                     }
                     if (selectionKey.isReadable())
                     {
-                        System.out.println("Read");
+                        logger.trace("Read");
                         int bytesRead = 0;
                         if (!lengthRead)
                         {
@@ -146,19 +138,19 @@ public class SocketChannelTCPClient extends TCPClient
 
                             lengthBuffer.flip();
                             length = lengthBuffer.getInt();
-                            System.out.println("Length: " + length);
+                            logger.trace("Length: " + length);
                             lengthRead = true;
                         }
                         else
                         {
-                            contentBuffer.clear();
+                            /**contentBuffer.clear();
                             if (length - 4 > bufferSize)
                             {
-                                System.out.println("Buffer size too small");
+                                logger.trace("Buffer size too small");
                                 throw new RuntimeException("Buffer size too small! Content length: " + (length - 4) + ", bufferSize: " + bufferSize);
-                            }
+                            }*/
 
-                            contentBuffer.limit(length - 4);
+                            ByteBuffer contentBuffer = ByteBuffer.allocate(length - 4);
                             while(bytesRead < length - 4)
                             {
                                 bytesRead += socketChannel.read(contentBuffer);
@@ -168,7 +160,7 @@ public class SocketChannelTCPClient extends TCPClient
                                     break;
                                 }
 
-                                System.out.println("Bytes read: " + bytesRead);
+                                logger.trace("Bytes read: " + bytesRead);
                             }
 
 
@@ -184,7 +176,7 @@ public class SocketChannelTCPClient extends TCPClient
                                 }
                             });
                             lengthRead = false;
-                            System.out.println("All Bytes read: " + (length - 4));
+                            logger.trace("All Bytes read: " + (length - 4));
                             length = 0;
                         }
 
@@ -195,12 +187,12 @@ public class SocketChannelTCPClient extends TCPClient
                     }
                     if (selectionKey.isWritable())
                     {
-                        System.out.println("Write");
+                        logger.trace("Write");
                     }
                 }
             } catch (IOException e)
             {
-                e.printStackTrace();
+                logger.error(e.getMessage());
                 disconnect();
                 break;
             }
@@ -210,13 +202,14 @@ public class SocketChannelTCPClient extends TCPClient
             }
         }
 
-        System.out.println("Selector thread ends");
+        logger.trace("Selector thread ends");
     }
 
     @Override
     public void disconnect()
     {
-        System.out.println("Disconnecting");
+        logger.trace("Disconnecting");
+        connectionPending = false;
         if (socketChannel != null)
         {
             try
@@ -234,7 +227,7 @@ public class SocketChannelTCPClient extends TCPClient
             }
             catch (IOException e)
             {
-                e.printStackTrace();
+                logger.error(e.getMessage());
             }
         }
 
@@ -244,34 +237,29 @@ public class SocketChannelTCPClient extends TCPClient
     @Override
     public void sendMessage(final Message msg)
     {
-        System.out.println("Trying to send Message: " + msg.toString());
+        logger.trace("Trying to send Message: " + msg.toString());
         if (socketChannel == null || !isConnected())
         {
-            System.out.println("Cannot send message: Connected: " + isConnected() + ", null: " + socketChannel == null);
+            logger.trace("Cannot send message: Connected: " + isConnected() + ", null: " + (socketChannel == null));
             return;
         }
 
-        service.submit(new Runnable()
-        {
-            @Override
-            public void run()
+        service.submit(() -> {
+            try
             {
-                try
+                logger.trace("Runnable...");
+                ByteBuffer buffer = msg.getBuffer();
+                int bytes = 0;
+                while(buffer.hasRemaining())
                 {
-                    System.out.println("Runnable...");
-                    ByteBuffer buffer = msg.getBuffer();
-                    int bytes = 0;
-                    while(buffer.hasRemaining())
-                    {
-                        bytes += socketChannel.write(buffer);
-                    }
-
-                    System.out.println("Wrote bytes: " + bytes + "/" + buffer.limit());
-                } catch (IOException e)
-                {
-                    e.printStackTrace();
-                    disconnect();
+                    bytes += socketChannel.write(buffer);
                 }
+
+                logger.info("Wrote bytes: " + bytes + "/" + buffer.limit());
+            } catch (IOException e)
+            {
+                logger.error(e.getMessage());
+                disconnect();
             }
         });
     }

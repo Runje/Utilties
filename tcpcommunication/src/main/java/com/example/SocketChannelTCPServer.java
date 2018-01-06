@@ -76,7 +76,7 @@ public class SocketChannelTCPServer implements TCPServer
             return true;
         } catch (IOException e)
         {
-            logger.error(e.getMessage());
+            logger.error(e.toString());
             running = false;
             return false;
         }
@@ -84,117 +84,106 @@ public class SocketChannelTCPServer implements TCPServer
 
     private void handleSelector()
     {
-        receiveThread = new Thread(new Runnable()
-        {
-            @Override
-            public void run()
+        receiveThread = new Thread(() -> {
+            List<Client> clients = new ArrayList<>();
+            while(running)
             {
-                List<Client> clients = new ArrayList<>();
-                while(running)
+                try
                 {
-                    try
+                    int selected = selector.select();
+                    logger.trace("selected: " + selected);
+                    Iterator it = selector.selectedKeys().iterator();
+                    while (it.hasNext())
                     {
-                        int selected = selector.select();
-                        logger.info("selected: " + selected);
-                        Iterator it = selector.selectedKeys().iterator();
-                        while (it.hasNext())
+                        SelectionKey selKey = (SelectionKey) it.next();
+                        it.remove();
+
+                        if (selKey.isAcceptable())
                         {
-                            SelectionKey selKey = (SelectionKey) it.next();
-                            it.remove();
-
-                            if (selKey.isAcceptable())
+                            ServerSocketChannel ssChannel = (ServerSocketChannel) selKey.channel();
+                            SocketChannel sc = ssChannel.accept();
+                            sc.configureBlocking(false);
+                            clients.add(new Client(sc));
+                            logger.trace("Accepted Client: " + clients.size());
+                            sc.register(selector, SelectionKey.OP_READ);
+                            if (onAcceptListener != null)
                             {
-                                ServerSocketChannel ssChannel = (ServerSocketChannel) selKey.channel();
-                                SocketChannel sc = ssChannel.accept();
-                                sc.configureBlocking(false);
-                                clients.add(new Client(sc));
-                                logger.info("Accepted Client: " + clients.size());
-                                sc.register(selector, SelectionKey.OP_READ);
-                                if (onAcceptListener != null)
-                                {
-                                    onAcceptListener.onAccept(sc);
-                                }
-
+                                onAcceptListener.onAccept(sc);
                             }
 
-                            if (selKey.isReadable())
+                        }
+
+                        if (selKey.isReadable())
+                        {
+                            logger.trace("Reading...");
+                            SocketChannel channel = (SocketChannel) selKey.channel();
+                            final Client client = getClient(channel, clients);
+                            if (client != null)
                             {
-                                logger.info("Reading...");
-                                SocketChannel channel = (SocketChannel) selKey.channel();
-                                final Client client = getClient(channel, clients);
-                                if (client != null)
+                                try
                                 {
-                                    try
+                                    int bytesRead = 0;
+                                    if (!client.isLengthRead)
                                     {
-                                        int bytesRead = 0;
-                                        if (!client.isLengthRead)
+                                        client.lengthBuffer.clear();
+                                        while (bytesRead < 4)
                                         {
-                                            client.lengthBuffer.clear();
-                                            while (bytesRead < 4)
+                                            bytesRead += channel.read(client.lengthBuffer);
+                                            if (bytesRead <= 0)
                                             {
-                                                bytesRead += channel.read(client.lengthBuffer);
-                                                if (bytesRead <= 0)
-                                                {
-                                                    closeClient(client, clients);
-                                                    break;
-                                                }
-                                            }
-
-                                            client.lengthBuffer.flip();
-                                            client.length = client.lengthBuffer.getInt();
-                                            logger.info("Length: " + client.length);
-                                            client.isLengthRead = true;
-                                        } else
-                                        {
-                                            client.contentBuffer.clear();
-                                            client.contentBuffer.limit(client.length - 4);
-                                            while (bytesRead < client.length)
-                                            {
-                                                bytesRead += channel.read(client.contentBuffer);
-                                                if (bytesRead <= 0)
-                                                {
-                                                    closeClient(client, clients);
-                                                    break;
-                                                }
-
-                                                client.contentBuffer.flip();
-                                                final byte[] bytes = new byte[client.length - 4];
-                                                client.contentBuffer.get(bytes);
-                                                service.submit(new Runnable()
-                                                {
-                                                    @Override
-                                                    public void run()
-                                                    {
-                                                        logger.info("Calling receiveBytes");
-                                                        onReceiveBytes(bytes, client.channel);
-                                                    }
-                                                });
-                                                client.isLengthRead = false;
-                                                logger.info("Bytes read: " + (client.length - 4));
-                                                client.length = 0;
+                                                closeClient(client, clients);
+                                                break;
                                             }
                                         }
-                                    }
-                                    catch (Exception e)
+
+                                        client.lengthBuffer.flip();
+                                        client.length = client.lengthBuffer.getInt();
+                                        client.isLengthRead = true;
+                                    } else
                                     {
-                                        logger.error(e.getMessage());
-                                        closeClient(client, clients);
+                                        client.contentBuffer.clear();
+                                        int contentLength = client.length - 4;
+                                        client.contentBuffer.limit(contentLength);
+                                        while (bytesRead < contentLength) {
+                                            bytesRead += channel.read(client.contentBuffer);
+                                            // TODO: read bytes may not equal the full message --> Next peace of message could be first ready later or never, this could be an endless loop! Reimplemnt server as seen in : http://tutorials.jenkov.com/java-nio/non-blocking-server.html
+                                            if (bytesRead <= 0) {
+                                                closeClient(client, clients);
+                                                break;
+                                            }
+                                        }
+
+                                        client.contentBuffer.flip();
+                                        final byte[] bytes = new byte[contentLength];
+                                        client.contentBuffer.get(bytes);
+                                        service.submit(() -> {
+                                            logger.trace("Calling receiveBytes");
+                                            onReceiveBytes(bytes, client.channel);
+                                        });
+                                        client.isLengthRead = false;
+                                        logger.trace("Bytes read: " + contentLength);
+                                        client.length = 0;
                                     }
-                                 }
-                                else
-                                {
-                                    logger.info("No client found");
                                 }
+                                catch (Exception e)
+                                {
+                                    logger.error("Ex while reading: " + e.toString());
+                                    closeClient(client, clients);
+                                }
+                             }
+                            else
+                            {
+                                logger.trace("No client found");
                             }
                         }
-                    } catch (IOException e)
-                    {
-                        logger.error(e.getMessage());
                     }
+                } catch (IOException e)
+                {
+                    logger.trace("Ex while selecting: " + e.toString());
                 }
-
-                logger.info("Receiver Thread ends");
             }
+
+            logger.trace("Receiver Thread ends");
         });
         receiveThread.start();
     }
@@ -206,11 +195,11 @@ public class SocketChannelTCPServer implements TCPServer
             client.channel.close();
         } catch (IOException e)
         {
-            logger.error(e.getMessage());
+            logger.error("Error while closing: " + e.toString());
         }
 
         clients.remove(client);
-        logger.info("Remove client, Clients left: " + clients.size());
+        logger.trace("Remove client, Clients left: " + clients.size());
 
         if (onRemoveClientListener != null)
         {
@@ -243,17 +232,17 @@ public class SocketChannelTCPServer implements TCPServer
     {
         try
         {
-            logger.info("Trying to write " + buffer.limit() + " bytes. Channel: " + channel);
+            logger.trace("Trying to write " + buffer.limit() + " bytes. Channel: " + channel);
             int bytes = 0;
             while(buffer.hasRemaining())
             {
                 bytes += channel.write(buffer);
             }
-            logger.info("Wrote bytes: " + bytes + "/" + buffer.limit());
+            logger.trace("Wrote bytes: " + bytes + "/" + buffer.limit());
             return true;
         } catch (IOException e)
         {
-            logger.error(e.getMessage());
+            logger.error("Error while writing: " + e.toString());
             return false;
         }
     }
@@ -264,33 +253,33 @@ public class SocketChannelTCPServer implements TCPServer
         running = false;
         try
         {
-            logger.info("Closing selector...");
+            logger.trace("Closing selector...");
             selector.close();
         } catch (IOException e) {
-            logger.error(e.getMessage());
+            logger.error("Error while stopping: " + e.toString());
         }
 
         if (socketChannel != null) {
             try {
-                logger.info("Closing socketchannel...");
+                logger.trace("Closing socketchannel...");
                 socketChannel.close();
-                logger.info("Closed socket channel");
+                logger.trace("Closed socket channel");
             } catch (IOException e) {
-                logger.error(e.getMessage());
+                logger.error("Error while stopping socket channel: " + e.toString());
             }
         }
 
         if (receiveThread != null) {
             try {
-                logger.info("Waiting for receive thread to end...");
+                logger.trace("Waiting for receive thread to end...");
                 receiveThread.join();
 
             } catch (InterruptedException e) {
-                logger.error(e.getMessage());
+                logger.error("Error while joining: " + e.toString());
             }
         }
 
-        logger.info("SocketChannelTCPServer closed");
+        logger.trace("SocketChannelTCPServer closed");
 
     }
 
